@@ -2,9 +2,9 @@
 Main bot handler for Korea Stock Alert Bot
 """
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, 
+    Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
 )
 
@@ -24,10 +24,14 @@ class BotHandler:
         self.user_manager = UserManager(db_manager)
         self.application = Application.builder().token(bot_token).build()
         self.alert_sender = None  # Will be set after bot is initialized
-        
+
         # User states for conversation flow
         self.waiting_for_settings = set()
-        
+
+        # 종목 변경 시 호출되는 콜백 (WebSocket 구독 관리용)
+        self.on_stock_added = None      # async def callback(stock_code: str)
+        self.on_stock_removed = None    # async def callback(stock_code: str)
+
         self._setup_handlers()
     
     def _setup_handlers(self):
@@ -39,17 +43,40 @@ class BotHandler:
         self.application.add_handler(CommandHandler("remove", self.remove_command))
         self.application.add_handler(CommandHandler("list", self.list_command))
         self.application.add_handler(CommandHandler("settings", self.settings_command))
-        
+        self.application.add_handler(CommandHandler("status", self.status_command))
+
         # Callback query handler for inline keyboards
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
-        
-        # Message handler for settings input
+
+        # 일반 텍스트 메시지 → 종목 검색 또는 설정 입력
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message)
         )
-        
+
+        # 알 수 없는 /명령어 → 종목 검색 (예: /삼성, /카카오)
+        self.application.add_handler(
+            MessageHandler(filters.COMMAND, self.handle_unknown_command)
+        )
+
         # Error handler
         self.application.add_error_handler(self.error_handler)
+
+        # 봇 시작 후 명령어 메뉴 등록
+        self.application.post_init = self._set_bot_commands
+
+    async def _set_bot_commands(self, application):
+        """텔레그램 봇 명령어 메뉴 등록"""
+        commands = [
+            BotCommand("start", "봇 시작 / 초기화"),
+            BotCommand("add", "종목 추가 (코드/이름/검색)"),
+            BotCommand("remove", "종목 제거 (코드/이름)"),
+            BotCommand("list", "내 관심종목 목록"),
+            BotCommand("settings", "알림 임계값 설정"),
+            BotCommand("status", "봇 상태 확인"),
+            BotCommand("help", "도움말"),
+        ]
+        await application.bot.set_my_commands(commands)
+        logger.info("봇 명령어 메뉴 등록 완료")
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command"""
@@ -87,80 +114,163 @@ class BotHandler:
         await update.message.reply_text(MESSAGES["help"], parse_mode='Markdown')
     
     async def add_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /add [stock_code] command"""
+        """Handle /add [종목코드 또는 종목명] command"""
         try:
             user_id = update.effective_user.id
-            
-            # Check if stock code provided
+
             if not context.args or len(context.args) == 0:
                 await update.message.reply_text(
-                    "💡 사용법: /add [종목코드]\n예시: /add 005930"
-                )
-                return
-            
-            stock_code = context.args[0].strip()
-            
-            # Add stock to watchlist
-            success, message = await self.user_manager.add_stock_to_watchlist(
-                user_id, stock_code
-            )
-            
-            # Show updated watchlist if successful
-            if success:
-                # Create quick action keyboard
-                keyboard = [
-                    [InlineKeyboardButton("📋 내 종목 보기", callback_data="show_list")],
-                    [InlineKeyboardButton("➕ 다른 종목 추가", callback_data="help_add")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await update.message.reply_text(
-                    message, 
-                    reply_markup=reply_markup,
+                    "💡 *종목 추가 방법:*\n\n"
+                    "• /add 삼성 → 검색 결과에서 선택\n"
+                    "• /add 005930 → 종목코드로 직접 추가\n"
+                    "• 삼성 → 텍스트만 입력해도 검색",
                     parse_mode='Markdown'
                 )
-            else:
-                await update.message.reply_text(message, parse_mode='Markdown')
-                
+                return
+
+            query = " ".join(context.args).strip()
+
+            # 6자리 숫자면 종목코드로 바로 추가
+            if self.user_manager.validate_stock_code(query):
+                await self._add_stock_direct(update, user_id, query)
+                return
+
+            # 텍스트면 종목명 검색
+            from ..utils.stock_search import get_stock_searcher
+            searcher = get_stock_searcher()
+            results = searcher.search(query, limit=8)
+
+            if not results:
+                await update.message.reply_text(
+                    f"🔍 '{query}'에 대한 검색 결과가 없습니다.\n"
+                    "6자리 종목코드로 직접 추가해보세요."
+                )
+                return
+
+            if len(results) == 1:
+                # 결과가 1개면 바로 추가
+                await self._add_stock_direct(update, user_id, results[0][0])
+                return
+
+            # 여러 결과 → 인라인 키보드로 선택
+            keyboard = []
+            for code, name in results:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"{name} ({code})",
+                        callback_data=f"addstock_{code}"
+                    )
+                ])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await update.message.reply_text(
+                f"🔍 *'{query}' 검색 결과*\n\n추가할 종목을 선택하세요:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+
         except Exception as e:
             logger.error(f"Error in add command: {e}")
             await update.message.reply_text(MESSAGES["error"])
+
+    async def _add_stock_direct(self, update: Update, user_id: int, stock_code: str):
+        """종목코드로 직접 추가"""
+        success, message = await self.user_manager.add_stock_to_watchlist(
+            user_id, stock_code
+        )
+
+        if success and self.on_stock_added:
+            try:
+                await self.on_stock_added(stock_code)
+            except Exception as e:
+                logger.error(f"종목 추가 콜백 오류: {e}")
+
+        keyboard = [
+            [InlineKeyboardButton("📋 내 종목 보기", callback_data="show_list")],
+            [InlineKeyboardButton("➕ 다른 종목 추가", callback_data="help_add")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
     
     async def remove_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /remove [stock_code] command"""
+        """Handle /remove [종목코드 또는 종목명] command"""
         try:
             user_id = update.effective_user.id
-            
-            # Check if stock code provided
+
             if not context.args or len(context.args) == 0:
-                await update.message.reply_text(
-                    "💡 사용법: /remove [종목코드]\n예시: /remove 005930"
-                )
-                return
-            
-            stock_code = context.args[0].strip()
-            
-            # Remove stock from watchlist
-            success, message = await self.user_manager.remove_stock_from_watchlist(
-                user_id, stock_code
-            )
-            
-            # Show updated watchlist if successful
-            if success:
-                keyboard = [
-                    [InlineKeyboardButton("📋 내 종목 보기", callback_data="show_list")],
-                    [InlineKeyboardButton("➕ 종목 추가", callback_data="help_add")]
-                ]
+                # 관심종목을 인라인 버튼으로 보여주기
+                watchlist = await self.user_manager.get_user_watchlist(user_id)
+                if not watchlist:
+                    await update.message.reply_text(MESSAGES["empty_watchlist"])
+                    return
+
+                from ..utils.stock_utils import get_stock_name
+                keyboard = []
+                for code in watchlist:
+                    name = get_stock_name(code) or code
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            f"❌ {name} ({code})",
+                            callback_data=f"rmstock_{code}"
+                        )
+                    ])
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                
+
                 await update.message.reply_text(
-                    message,
+                    "🗑️ 제거할 종목을 선택하세요:",
                     reply_markup=reply_markup,
                     parse_mode='Markdown'
                 )
-            else:
-                await update.message.reply_text(message, parse_mode='Markdown')
-                
+                return
+
+            query = " ".join(context.args).strip()
+
+            # 6자리 숫자면 바로 제거
+            stock_code = query
+            if not self.user_manager.validate_stock_code(query):
+                # 종목명으로 검색
+                from ..utils.stock_search import get_stock_searcher
+                searcher = get_stock_searcher()
+                code = searcher.get_code(query)
+                if code:
+                    stock_code = code
+                else:
+                    results = searcher.search(query, limit=1)
+                    if results:
+                        stock_code = results[0][0]
+                    else:
+                        await update.message.reply_text(
+                            f"❌ '{query}'에 해당하는 종목을 찾을 수 없습니다."
+                        )
+                        return
+
+            success, message = await self.user_manager.remove_stock_from_watchlist(
+                user_id, stock_code
+            )
+
+            if success and self.on_stock_removed:
+                try:
+                    await self.on_stock_removed(stock_code)
+                except Exception as e:
+                    logger.error(f"종목 제거 콜백 오류: {e}")
+
+            keyboard = [
+                [InlineKeyboardButton("📋 내 종목 보기", callback_data="show_list")],
+                [InlineKeyboardButton("➕ 종목 추가", callback_data="help_add")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await update.message.reply_text(
+                message,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+
         except Exception as e:
             logger.error(f"Error in remove command: {e}")
             await update.message.reply_text(MESSAGES["error"])
@@ -231,6 +341,36 @@ class BotHandler:
             logger.error(f"Error in settings command: {e}")
             await update.message.reply_text(MESSAGES["error"])
     
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /status command - 봇 상태 확인"""
+        try:
+            user_id = update.effective_user.id
+            stats = await self.user_manager.get_user_statistics(user_id)
+
+            watchlist = await self.user_manager.get_user_watchlist(user_id)
+            stock_list = ""
+            if watchlist:
+                from ..utils.stock_utils import get_stock_name
+                for code in watchlist:
+                    name = get_stock_name(code) or "알수없음"
+                    stock_list += f"  • {name} ({code})\n"
+            else:
+                stock_list = "  없음\n"
+
+            message = (
+                f"📊 *봇 상태*\n\n"
+                f"👤 관심종목: {stats['watchlist_count']}/{stats['watchlist_limit']}개\n"
+                f"{stock_list}\n"
+                f"⚙️ 알림 조건: 3분 내 ±{stats['alert_threshold']:.1f}% 이상 변동 시\n"
+                f"🔔 실시간 모니터링 {'활성' if stats['watchlist_count'] > 0 else '대기중'}"
+            )
+
+            await update.message.reply_text(message, parse_mode='Markdown')
+
+        except Exception as e:
+            logger.error(f"Error in status command: {e}")
+            await update.message.reply_text(MESSAGES["error"])
+
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle inline keyboard button clicks"""
         try:
@@ -296,42 +436,161 @@ class BotHandler:
                     parse_mode='Markdown'
                 )
                 
+            elif data.startswith("rmstock_"):
+                # 인라인 버튼에서 종목 제거
+                stock_code = data.replace("rmstock_", "")
+                success, message = await self.user_manager.remove_stock_from_watchlist(
+                    user_id, stock_code
+                )
+
+                if success and self.on_stock_removed:
+                    try:
+                        await self.on_stock_removed(stock_code)
+                    except Exception as e:
+                        logger.error(f"종목 제거 콜백 오류: {e}")
+
+                keyboard = [
+                    [InlineKeyboardButton("📋 내 종목 보기", callback_data="show_list")],
+                    [InlineKeyboardButton("➕ 종목 추가", callback_data="help_add")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.edit_message_text(
+                    message,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+
+            elif data.startswith("addstock_"):
+                # 검색 결과에서 종목 선택 → 추가
+                stock_code = data.replace("addstock_", "")
+                success, message = await self.user_manager.add_stock_to_watchlist(
+                    user_id, stock_code
+                )
+
+                if success and self.on_stock_added:
+                    try:
+                        await self.on_stock_added(stock_code)
+                    except Exception as e:
+                        logger.error(f"종목 추가 콜백 오류: {e}")
+
+                keyboard = [
+                    [InlineKeyboardButton("📋 내 종목 보기", callback_data="show_list")],
+                    [InlineKeyboardButton("➕ 다른 종목 추가", callback_data="help_add")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.edit_message_text(
+                    message,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+
             elif data == "help_add":
                 await query.edit_message_text(
-                    "💡 종목 추가 방법:\n/add [종목코드]\n\n예시: /add 005930",
+                    "💡 *종목 추가 방법:*\n\n"
+                    "• /add 삼성 → 검색 결과에서 선택\n"
+                    "• /add 005930 → 종목코드로 직접 추가\n"
+                    "• /삼성 → 바로 검색\n"
+                    "• 삼성 → 텍스트만 입력해도 검색",
                     parse_mode='Markdown'
                 )
-                
+
             elif data == "help_remove":
                 await query.edit_message_text(
-                    "💡 종목 제거 방법:\n/remove [종목코드]\n\n예시: /remove 005930",
+                    "💡 *종목 제거 방법:*\n\n"
+                    "• /remove → 목록에서 버튼으로 제거\n"
+                    "• /remove 삼성전자 → 이름으로 제거\n"
+                    "• /remove 005930 → 종목코드로 제거",
                     parse_mode='Markdown'
                 )
-                
+
         except Exception as e:
             logger.error(f"Error in button callback: {e}")
-            await query.answer("오류가 발생했습니다.")
+            if query:
+                await query.answer("오류가 발생했습니다.")
     
+    async def _search_and_show(self, update: Update, query: str):
+        """종목 검색 후 인라인 키보드로 결과 표시"""
+        from ..utils.stock_search import get_stock_searcher
+        searcher = get_stock_searcher()
+
+        # 6자리 숫자면 바로 종목 정보 표시
+        if self.user_manager.validate_stock_code(query):
+            name = searcher.get_name(query)
+            if name:
+                keyboard = [
+                    [InlineKeyboardButton(
+                        f"➕ {name} ({query}) 추가",
+                        callback_data=f"addstock_{query}"
+                    )]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await update.message.reply_text(
+                    f"🔍 *{name}* ({query})",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text(f"❌ '{query}' 종목을 찾을 수 없습니다.")
+            return
+
+        results = searcher.search(query, limit=8)
+
+        if not results:
+            await update.message.reply_text(
+                f"🔍 '{query}'에 대한 검색 결과가 없습니다."
+            )
+            return
+
+        keyboard = []
+        for code, name in results:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"➕ {name} ({code})",
+                    callback_data=f"addstock_{code}"
+                )
+            ])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            f"🔍 *'{query}' 검색 결과*\n\n추가할 종목을 선택하세요:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+    async def handle_unknown_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """알 수 없는 /명령어를 종목 검색으로 처리 (예: /삼성 → '삼성' 검색)"""
+        try:
+            text = update.message.text.strip()
+            # /삼성 → 삼성, /카카오 → 카카오
+            query = text.lstrip('/')
+            if query:
+                await self._search_and_show(update, query)
+        except Exception as e:
+            logger.error(f"Error in handle_unknown_command: {e}")
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle text messages (mainly for settings input)"""
+        """Handle text messages - 설정 입력 또는 종목 검색"""
         try:
             user_id = update.effective_user.id
             text = update.message.text.strip()
-            
+
+            # 설정값 입력 대기 중
             if user_id in self.waiting_for_settings:
                 self.waiting_for_settings.remove(user_id)
-                
+
                 try:
                     threshold = float(text)
                     success, message = await self.user_manager.update_alert_settings(
                         user_id, threshold
                     )
-                    
+
                     keyboard = [
                         [InlineKeyboardButton("📋 내 종목 보기", callback_data="show_list")]
                     ]
                     reply_markup = InlineKeyboardMarkup(keyboard)
-                    
+
                     await update.message.reply_text(
                         message,
                         reply_markup=reply_markup,
@@ -342,7 +601,12 @@ class BotHandler:
                         MESSAGES["invalid_threshold"],
                         parse_mode='Markdown'
                     )
-            
+                return
+
+            # 일반 텍스트 → 종목 검색
+            if text:
+                await self._search_and_show(update, text)
+
         except Exception as e:
             logger.error(f"Error in handle_message: {e}")
     

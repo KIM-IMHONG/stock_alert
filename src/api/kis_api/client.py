@@ -105,40 +105,67 @@ class KISAPIClient:
         if self._access_token and self._token_expires_at:
             if datetime.now() < self._token_expires_at - timedelta(minutes=5):
                 return self._access_token
-        
+
         logger.info("새로운 액세스 토큰 요청")
-        
+
         url = self.config.BASE_URL + self.config.TOKEN_URL
         data = {
             "grant_type": "client_credentials",
             "appkey": self.config.app_key,
             "appsecret": self.config.app_secret
         }
-        
+
         try:
             response = self._make_request("POST", url, json=data)
-            
-            if response.get("rt_cd") != "0":
-                raise KISAuthError(f"토큰 발급 실패: {response.get('msg1', 'Unknown error')}")
-            
+
+            if "access_token" not in response:
+                raise KISAuthError(f"토큰 발급 실패: {response.get('msg1', response)}")
+
             self._access_token = response["access_token"]
-            # 토큰 유효시간 (보통 24시간)
             expires_in = response.get("expires_in", 86400)
             self._token_expires_at = datetime.now() + timedelta(seconds=expires_in)
-            
-            # 세션 헤더에 토큰 추가
+
             self.session.headers.update({
                 'Authorization': f'Bearer {self._access_token}',
                 'appkey': self.config.app_key,
                 'appsecret': self.config.app_secret
             })
-            
+
             logger.info("액세스 토큰 발급 완료")
             return self._access_token
-            
+
+        except KISAuthError:
+            raise
         except Exception as e:
             logger.error(f"토큰 발급 실패: {e}")
             raise KISAuthError(f"토큰 발급 실패: {e}")
+
+    def get_approval_key(self) -> str:
+        """WebSocket 접속키 발급"""
+        logger.info("WebSocket 접속키 요청")
+
+        url = self.config.BASE_URL + self.config.APPROVAL_URL
+        data = {
+            "grant_type": "client_credentials",
+            "appkey": self.config.app_key,
+            "secretkey": self.config.app_secret
+        }
+
+        try:
+            response = self._make_request("POST", url, json=data)
+
+            if "approval_key" not in response:
+                raise KISAuthError(f"접속키 발급 실패: {response}")
+
+            approval_key = response["approval_key"]
+            logger.info("WebSocket 접속키 발급 완료")
+            return approval_key
+
+        except KISAuthError:
+            raise
+        except Exception as e:
+            logger.error(f"접속키 발급 실패: {e}")
+            raise KISAuthError(f"접속키 발급 실패: {e}")
     
     def get_stock_info(self, stock_code: str) -> StockInfo:
         """종목 정보 조회"""

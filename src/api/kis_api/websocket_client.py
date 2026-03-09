@@ -1,263 +1,276 @@
 """
-한국투자증권 WebSocket 실시간 데이터 클라이언트
+한국투자증권 WebSocket 실시간 데이터 클라이언트 (Async)
 """
+import asyncio
 import json
-import time
-import threading
-import websocket
 import logging
-from typing import Dict, Any, Callable, Optional, List
+from typing import Callable, Dict, List, Optional, Set
 from dataclasses import dataclass
 from datetime import datetime
 
+import websockets
+
 from .config import KISConfig
-from .exceptions import KISConnectionError, KISDataError
+from .exceptions import KISConnectionError
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class RealtimeData:
-    """실시간 데이터 구조"""
+    """실시간 체결 데이터"""
     stock_code: str
     current_price: int
-    change_rate: float
-    change_amount: int
-    trading_volume: int
-    bid_price: int  # 매수호가
-    ask_price: int  # 매도호가
+    change_rate: float       # 전일대비율
+    change_amount: int       # 전일대비
+    open_price: int          # 시가
+    high_price: int          # 고가
+    low_price: int           # 저가
+    trading_volume: int      # 체결거래량
+    accumulated_volume: int  # 누적거래량
     timestamp: datetime
 
+
 class KISWebSocketClient:
-    """한국투자증권 WebSocket 실시간 데이터 클라이언트"""
-    
-    def __init__(self, config: KISConfig, access_token: str):
-        self.config = config
-        self.access_token = access_token
+    """한국투자증권 WebSocket 실시간 데이터 클라이언트 (Async)"""
+
+    # H0STCNT0 필드 인덱스 (주식체결 - 정규장)
+    F_STOCK_CODE = 0       # 종목코드
+    F_TIME = 1             # 체결시간
+    F_CURRENT_PRICE = 2    # 현재가
+    F_SIGN = 3             # 전일대비부호 (1:상한,2:상승,3:보합,4:하한,5:하락)
+    F_CHANGE_AMOUNT = 4    # 전일대비
+    F_CHANGE_RATE = 5      # 전일대비율
+    F_OPEN_PRICE = 7       # 시가
+    F_HIGH_PRICE = 8       # 고가
+    F_LOW_PRICE = 9        # 저가
+    F_VOLUME = 12          # 체결거래량
+    F_ACC_VOLUME = 13      # 누적거래량
+
+    # TR ID (H0STCNT0는 정규장+시간외 체결 모두 수신)
+    TR_STOCK = "H0STCNT0"
+
+    def __init__(self, ws_url: str, approval_key: str):
+        self.ws_url = ws_url
+        self.approval_key = approval_key
         self.ws = None
         self.is_connected = False
-        self.subscribed_stocks = set()
-        self.callbacks = {}
-        self.reconnect_attempts = 0
-        self.max_reconnect_attempts = 10
-        self.reconnect_delay = 5
-        
-        # 데이터 파싱용 필드 매핑
-        self.field_mapping = {
-            'MKSC_SHRN_ISCD': 'stock_code',      # 종목코드
-            'STCK_PRPR': 'current_price',        # 현재가
-            'PRDY_VRSS_SIGN': 'sign',            # 전일대비부호
-            'PRDY_VRSS': 'change_amount',        # 전일대비
-            'PRDY_CTRT': 'change_rate',          # 전일대비율
-            'ACML_VOL': 'trading_volume',        # 누적거래량
-            'STCK_BIDP': 'bid_price',            # 매수호가
-            'STCK_ASKP': 'ask_price'             # 매도호가
-        }
-    
-    def connect(self):
-        """WebSocket 연결"""
-        try:
-            # WebSocket 연결
-            ws_url = f"{self.config.WEBSOCKET_URL}"
-            self.ws = websocket.WebSocketApp(
-                ws_url,
-                header={
-                    "authorization": f"Bearer {self.access_token}",
-                    "appkey": self.config.app_key,
-                    "secretkey": self.config.app_secret
-                },
-                on_open=self._on_open,
-                on_message=self._on_message,
-                on_error=self._on_error,
-                on_close=self._on_close
-            )
-            
-            # 별도 스레드에서 연결 실행
-            self.ws_thread = threading.Thread(target=self.ws.run_forever)
-            self.ws_thread.daemon = True
-            self.ws_thread.start()
-            
-            # 연결 대기
-            timeout = 10
-            start_time = time.time()
-            while not self.is_connected and (time.time() - start_time) < timeout:
-                time.sleep(0.1)
-            
-            if not self.is_connected:
-                raise KISConnectionError("WebSocket 연결 타임아웃")
-            
-            logger.info("WebSocket 연결 성공")
-            self.reconnect_attempts = 0
-            
-        except Exception as e:
-            logger.error(f"WebSocket 연결 실패: {e}")
-            raise KISConnectionError(f"WebSocket 연결 실패: {e}")
-    
-    def _on_open(self, ws):
-        """연결 성공시 호출"""
-        self.is_connected = True
-        logger.info("WebSocket 연결 성공")
-        
-        # 기존 구독 종목들 재구독
-        for stock_code in self.subscribed_stocks.copy():
-            self._subscribe_stock(stock_code)
-    
-    def _on_message(self, ws, message):
-        """메시지 수신시 호출"""
-        try:
-            # 메시지 파싱
-            data = self._parse_message(message)
-            if data:
-                stock_code = data.stock_code
-                
-                # 콜백 실행
-                if stock_code in self.callbacks:
-                    for callback in self.callbacks[stock_code]:
-                        try:
-                            callback(data)
-                        except Exception as e:
-                            logger.error(f"콜백 실행 오류 [{stock_code}]: {e}")
-                
-        except Exception as e:
-            logger.error(f"메시지 처리 오류: {e}")
-    
-    def _on_error(self, ws, error):
-        """오류 발생시 호출"""
-        logger.error(f"WebSocket 오류: {error}")
-    
-    def _on_close(self, ws, close_status_code, close_msg):
-        """연결 종료시 호출"""
-        self.is_connected = False
-        logger.warning(f"WebSocket 연결 종료: {close_status_code}, {close_msg}")
-        
-        # 자동 재연결 시도
-        if self.reconnect_attempts < self.max_reconnect_attempts:
-            self.reconnect_attempts += 1
-            logger.info(f"재연결 시도 {self.reconnect_attempts}/{self.max_reconnect_attempts}")
-            time.sleep(self.reconnect_delay)
+        self.subscribed_stocks: Set[str] = set()
+        self._callbacks: List[Callable] = []
+        self._reconnect_delay = 5
+        self._max_reconnects = 50
+        self._should_run = False
+        self._connect_task: Optional[asyncio.Task] = None
+
+    def add_callback(self, callback: Callable):
+        """실시간 데이터 수신 콜백 등록"""
+        self._callbacks.append(callback)
+
+    async def start(self):
+        """WebSocket 연결 시작 (백그라운드 태스크)"""
+        self._should_run = True
+        self._connect_task = asyncio.create_task(self._connection_loop())
+        logger.info("WebSocket 클라이언트 시작")
+
+    async def _connection_loop(self):
+        """연결 루프 (자동 재연결 포함)"""
+        reconnect_count = 0
+
+        while self._should_run and reconnect_count < self._max_reconnects:
             try:
-                self.connect()
+                async with websockets.connect(
+                    self.ws_url,
+                    ping_interval=30,
+                    ping_timeout=10,
+                    close_timeout=5
+                ) as ws:
+                    self.ws = ws
+                    self.is_connected = True
+                    reconnect_count = 0
+                    logger.info("KIS WebSocket 연결 성공")
+
+                    # 기존 구독 종목 재구독
+                    for code in list(self.subscribed_stocks):
+                        await self._send_subscribe(code)
+
+                    # 메시지 수신 루프
+                    async for message in ws:
+                        if not self._should_run:
+                            break
+                        await self._handle_message(message)
+
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.warning(f"WebSocket 연결 끊김: {e}")
+            except asyncio.CancelledError:
+                logger.info("WebSocket 태스크 취소됨")
+                break
             except Exception as e:
-                logger.error(f"재연결 실패: {e}")
-    
-    def _parse_message(self, message: str) -> Optional[RealtimeData]:
-        """수신된 메시지 파싱"""
-        try:
-            # KIS WebSocket 메시지 형식에 따라 파싱
-            # 실제 형식은 API 문서 참조 필요
-            if isinstance(message, str):
-                # 파이프(|) 구분자로 되어 있는 경우가 많음
-                fields = message.split('|')
-                if len(fields) < 10:
-                    return None
-                
-                # 기본적인 파싱 (실제 필드 위치는 API 문서 확인 필요)
-                try:
-                    stock_code = fields[0]
-                    current_price = int(fields[2]) if fields[2].isdigit() else 0
-                    change_amount = int(fields[4]) if fields[4] else 0
-                    change_rate = float(fields[5]) if fields[5] else 0.0
-                    trading_volume = int(fields[6]) if fields[6].isdigit() else 0
-                    bid_price = int(fields[7]) if fields[7].isdigit() else 0
-                    ask_price = int(fields[8]) if fields[8].isdigit() else 0
-                    
-                    return RealtimeData(
-                        stock_code=stock_code,
-                        current_price=current_price,
-                        change_rate=change_rate,
-                        change_amount=change_amount,
-                        trading_volume=trading_volume,
-                        bid_price=bid_price,
-                        ask_price=ask_price,
-                        timestamp=datetime.now()
-                    )
-                    
-                except (ValueError, IndexError) as e:
-                    logger.debug(f"메시지 파싱 실패: {e}")
-                    return None
-            
-        except Exception as e:
-            logger.error(f"메시지 파싱 오류: {e}")
-        
-        return None
-    
-    def subscribe_realtime(self, stock_codes: List[str], callback: Callable[[RealtimeData], None]):
-        """실시간 데이터 구독"""
-        for stock_code in stock_codes:
-            self.subscribed_stocks.add(stock_code)
-            
-            if stock_code not in self.callbacks:
-                self.callbacks[stock_code] = []
-            self.callbacks[stock_code].append(callback)
-            
-            if self.is_connected:
-                self._subscribe_stock(stock_code)
-        
-        logger.info(f"실시간 구독 등록: {stock_codes}")
-    
-    def _subscribe_stock(self, stock_code: str):
-        """개별 종목 구독"""
-        if not self.is_connected:
-            logger.warning("WebSocket이 연결되지 않음")
-            return
-        
-        try:
-            # 구독 메시지 전송
-            subscribe_msg = {
-                "header": {
-                    "approval_key": self.access_token,
-                    "custtype": "P",
-                    "tr_type": "1",  # 등록
-                    "content-type": "utf-8"
-                },
-                "body": {
-                    "input": {
-                        "tr_id": "H0STCNT0",  # 주식 현재가 실시간
-                        "tr_key": stock_code
-                    }
+                logger.error(f"WebSocket 오류: {e}")
+            finally:
+                self.is_connected = False
+
+            if self._should_run:
+                reconnect_count += 1
+                logger.info(f"재연결 시도 {reconnect_count}/{self._max_reconnects} "
+                           f"({self._reconnect_delay}초 후)")
+                await asyncio.sleep(self._reconnect_delay)
+
+        if reconnect_count >= self._max_reconnects:
+            logger.error("최대 재연결 횟수 초과")
+
+    async def subscribe(self, stock_code: str):
+        """종목 실시간 구독"""
+        self.subscribed_stocks.add(stock_code)
+        if self.is_connected:
+            await self._send_subscribe(stock_code)
+        logger.info(f"종목 구독 등록: {stock_code}")
+
+    async def unsubscribe(self, stock_code: str):
+        """종목 구독 해제"""
+        self.subscribed_stocks.discard(stock_code)
+        if self.is_connected:
+            await self._send_unsubscribe(stock_code)
+        logger.info(f"종목 구독 해제: {stock_code}")
+
+    async def _send_subscribe(self, stock_code: str):
+        """구독 요청 전송"""
+        msg = json.dumps({
+            "header": {
+                "approval_key": self.approval_key,
+                "custtype": "P",
+                "tr_type": "1",
+                "content-type": "utf-8"
+            },
+            "body": {
+                "input": {
+                    "tr_id": self.TR_STOCK,
+                    "tr_key": stock_code
                 }
             }
-            
-            self.ws.send(json.dumps(subscribe_msg))
-            logger.debug(f"종목 구독 요청: {stock_code}")
-            
-        except Exception as e:
-            logger.error(f"종목 구독 실패 [{stock_code}]: {e}")
-    
-    def unsubscribe_stock(self, stock_code: str):
-        """종목 구독 해제"""
-        if stock_code in self.subscribed_stocks:
-            self.subscribed_stocks.remove(stock_code)
-        
-        if stock_code in self.callbacks:
-            del self.callbacks[stock_code]
-        
-        if self.is_connected:
-            try:
-                # 구독 해제 메시지
-                unsubscribe_msg = {
-                    "header": {
-                        "approval_key": self.access_token,
-                        "custtype": "P",
-                        "tr_type": "2",  # 해제
-                        "content-type": "utf-8"
-                    },
-                    "body": {
-                        "input": {
-                            "tr_id": "H0STCNT0",
-                            "tr_key": stock_code
-                        }
-                    }
+        })
+        await self.ws.send(msg)
+        logger.debug(f"구독 요청 전송: {stock_code}")
+
+    async def _send_unsubscribe(self, stock_code: str):
+        """구독 해제 요청 전송"""
+        msg = json.dumps({
+            "header": {
+                "approval_key": self.approval_key,
+                "custtype": "P",
+                "tr_type": "2",
+                "content-type": "utf-8"
+            },
+            "body": {
+                "input": {
+                    "tr_id": self.TR_STOCK,
+                    "tr_key": stock_code
                 }
-                
-                self.ws.send(json.dumps(unsubscribe_msg))
-                logger.info(f"종목 구독 해제: {stock_code}")
-                
-            except Exception as e:
-                logger.error(f"종목 구독 해제 실패 [{stock_code}]: {e}")
-    
-    def disconnect(self):
+            }
+        })
+        await self.ws.send(msg)
+        logger.debug(f"구독 해제 전송: {stock_code}")
+
+    async def _handle_message(self, message: str):
+        """수신 메시지 처리"""
+        # JSON 응답 (구독 확인 등)
+        if message.startswith('{'):
+            try:
+                data = json.loads(message)
+                header = data.get("header", {})
+                tr_id = header.get("tr_id", "")
+                msg_cd = header.get("msg_cd", "")
+                msg1 = data.get("body", {}).get("msg1", "")
+                logger.info(f"WebSocket 응답: tr_id={tr_id}, msg_cd={msg_cd}, msg={msg1}")
+            except json.JSONDecodeError:
+                logger.warning(f"JSON 파싱 실패: {message[:100]}")
+            return
+
+        # 실시간 데이터 (파이프 구분)
+        try:
+            parts = message.split('|')
+            if len(parts) < 4:
+                return
+
+            # parts[0]: 암호화여부 (0:평문, 1:암호화)
+            # parts[1]: tr_id
+            # parts[2]: 데이터 건수
+            # parts[3]: 데이터 (^ 구분)
+            encrypted = parts[0]
+            tr_id = parts[1]
+            data_count = int(parts[2])
+
+            if encrypted == "1":
+                logger.debug("암호화 데이터 수신 (복호화 미지원)")
+                return
+
+            if tr_id == self.TR_STOCK:
+                await self._parse_stock_data(parts[3], data_count)
+
+        except Exception as e:
+            logger.error(f"메시지 처리 오류: {e}")
+
+    async def _parse_stock_data(self, data_str: str, data_count: int):
+        """주식 체결 데이터 파싱"""
+        fields = data_str.split('^')
+
+        # H0STCNT0 필드 수 (약 46개)
+        fields_per_record = len(fields) // data_count if data_count > 0 else len(fields)
+
+        for i in range(data_count):
+            offset = i * fields_per_record
+            try:
+                if offset + self.F_ACC_VOLUME >= len(fields):
+                    break
+
+                # 전일대비부호에 따라 가격 부호 결정
+                sign = fields[offset + self.F_SIGN]
+                price = int(fields[offset + self.F_CURRENT_PRICE])
+                change_amount = int(fields[offset + self.F_CHANGE_AMOUNT])
+
+                # 하락(4,5)일 때 변동금액은 음수
+                if sign in ('4', '5'):
+                    change_amount = -abs(change_amount)
+
+                change_rate = float(fields[offset + self.F_CHANGE_RATE])
+                if sign in ('4', '5'):
+                    change_rate = -abs(change_rate)
+
+                realtime_data = RealtimeData(
+                    stock_code=fields[offset + self.F_STOCK_CODE],
+                    current_price=price,
+                    change_rate=change_rate,
+                    change_amount=change_amount,
+                    open_price=int(fields[offset + self.F_OPEN_PRICE]),
+                    high_price=int(fields[offset + self.F_HIGH_PRICE]),
+                    low_price=int(fields[offset + self.F_LOW_PRICE]),
+                    trading_volume=int(fields[offset + self.F_VOLUME]),
+                    accumulated_volume=int(fields[offset + self.F_ACC_VOLUME]),
+                    timestamp=datetime.now()
+                )
+
+                # 콜백 실행
+                for callback in self._callbacks:
+                    try:
+                        if asyncio.iscoroutinefunction(callback):
+                            await callback(realtime_data)
+                        else:
+                            callback(realtime_data)
+                    except Exception as e:
+                        logger.error(f"콜백 실행 오류 [{realtime_data.stock_code}]: {e}")
+
+            except (ValueError, IndexError) as e:
+                logger.debug(f"데이터 파싱 실패 (record {i}): {e}")
+
+    async def stop(self):
         """WebSocket 연결 종료"""
-        self.is_connected = False
+        self._should_run = False
+        if self._connect_task and not self._connect_task.done():
+            self._connect_task.cancel()
+            try:
+                await self._connect_task
+            except asyncio.CancelledError:
+                pass
         if self.ws:
-            self.ws.close()
-        logger.info("WebSocket 연결 종료")
+            await self.ws.close()
+        self.is_connected = False
+        logger.info("WebSocket 클라이언트 종료")

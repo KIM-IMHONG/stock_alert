@@ -7,9 +7,12 @@
 import logging
 import threading
 from typing import Dict, List, Optional, NamedTuple
-from datetime import datetime, time as datetime_time
+from datetime import datetime, time as datetime_time, timezone, timedelta
 from dataclasses import dataclass
 from enum import Enum
+
+# 한국 시간대
+KST = timezone(timedelta(hours=9))
 
 
 class AlertType(Enum):
@@ -49,32 +52,26 @@ class TradingTimeChecker:
     """거래 시간 체크"""
     
     def __init__(self):
-        # 한국 주식시장 거래시간: 09:00~15:30 (점심시간: 12:00~13:00)
+        # 한국 주식시장 거래시간: 09:00~15:30 (점심시간 없이 연속 거래)
         self.market_open = datetime_time(9, 0)      # 09:00
         self.market_close = datetime_time(15, 30)   # 15:30
-        self.lunch_start = datetime_time(12, 0)     # 12:00
-        self.lunch_end = datetime_time(13, 0)       # 13:00
-        
+
     def is_trading_hours(self, dt: datetime = None) -> bool:
-        """거래시간 여부 확인"""
+        """거래시간 여부 확인 (KST 기준)"""
         if dt is None:
-            dt = datetime.now()
-            
+            dt = datetime.now(KST)
+
         current_time = dt.time()
         weekday = dt.weekday()  # 0=월요일, 6=일요일
-        
+
         # 주말 체크
-        if weekday >= 5:  # 토요일(5), 일요일(6)
+        if weekday >= 5:
             return False
-            
+
         # 거래시간 체크
         if not (self.market_open <= current_time <= self.market_close):
             return False
-            
-        # 점심시간 체크
-        if self.lunch_start <= current_time < self.lunch_end:
-            return False
-            
+
         return True
         
     def get_next_trading_time(self, dt: datetime = None) -> datetime:

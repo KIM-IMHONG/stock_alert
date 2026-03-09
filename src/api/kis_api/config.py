@@ -12,9 +12,10 @@ class KISConfig:
     # 기본 API 엔드포인트
     BASE_URL: str = "https://openapi.koreainvestment.com:9443"
     WEBSOCKET_URL: str = "ws://ops.koreainvestment.com:21000"
-    
+
     # API 엔드포인트
     TOKEN_URL: str = "/oauth2/tokenP"  # 토큰 발급
+    APPROVAL_URL: str = "/oauth2/Approval"  # WebSocket 접속키 발급
     STOCK_INFO_URL: str = "/uapi/domestic-stock/v1/quotations/inquire-price"  # 종목 정보
     REALTIME_URL: str = "/uapi/domestic-stock/v1/quotations/inquire-ccnl"  # 실시간 현재가
     

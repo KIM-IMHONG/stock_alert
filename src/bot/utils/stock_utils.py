@@ -51,9 +51,17 @@ def validate_stock_code(stock_code: str) -> bool:
     cleaned_code = stock_code.strip()
     return bool(STOCK_CODE_PATTERN.match(cleaned_code))
 
-def get_stock_name(stock_code: str) -> str:
-    """Get stock name from code, return code if unknown"""
-    return KNOWN_STOCKS.get(stock_code, stock_code)
+def get_stock_name(stock_code: str) -> Optional[str]:
+    """Get stock name from code (StockSearcher 우선, 폴백으로 KNOWN_STOCKS)"""
+    try:
+        from .stock_search import get_stock_searcher
+        searcher = get_stock_searcher()
+        name = searcher.get_name(stock_code)
+        if name:
+            return name
+    except Exception:
+        pass
+    return KNOWN_STOCKS.get(stock_code)
 
 def format_price(price: float) -> str:
     """Format price with comma separators"""

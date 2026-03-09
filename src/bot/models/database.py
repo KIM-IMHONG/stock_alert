@@ -3,9 +3,12 @@ Database models and initialization for Korea Stock Alert Bot
 """
 import aiosqlite
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass
+
+# 한국 시간대
+KST = timezone(timedelta(hours=9))
 
 logger = logging.getLogger(__name__)
 
@@ -200,25 +203,26 @@ class DatabaseManager:
                 row = await cursor.fetchone()
                 return row[0] if row else 5.0
     
-    async def add_alert_history(self, user_id: int, stock_code: str, 
+    async def add_alert_history(self, user_id: int, stock_code: str,
                                alert_type: str, price: float, change_rate: float):
-        """Add alert to history"""
+        """Add alert to history (KST 시간 기록)"""
+        now_kst = datetime.now(KST).isoformat()
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
-                INSERT INTO alert_history 
-                (user_id, stock_code, alert_type, price, change_rate)
-                VALUES (?, ?, ?, ?, ?)
-            """, (user_id, stock_code, alert_type, price, change_rate))
+                INSERT INTO alert_history
+                (user_id, stock_code, alert_type, price, change_rate, sent_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (user_id, stock_code, alert_type, price, change_rate, now_kst))
             await db.commit()
     
-    async def can_send_alert(self, user_id: int, stock_code: str, 
+    async def can_send_alert(self, user_id: int, stock_code: str,
                             cooldown_minutes: int) -> bool:
-        """Check if alert can be sent (cooldown check)"""
-        cutoff_time = datetime.now() - timedelta(minutes=cooldown_minutes)
-        
+        """Check if alert can be sent (cooldown check, KST 기준)"""
+        cutoff_time = datetime.now(KST) - timedelta(minutes=cooldown_minutes)
+
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("""
-                SELECT COUNT(*) FROM alert_history 
+                SELECT COUNT(*) FROM alert_history
                 WHERE user_id = ? AND stock_code = ? AND sent_at > ?
             """, (user_id, stock_code, cutoff_time.isoformat())) as cursor:
                 row = await cursor.fetchone()

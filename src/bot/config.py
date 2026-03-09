@@ -3,6 +3,9 @@ Configuration settings for Korea Stock Alert Bot
 """
 import os
 from typing import Dict, Any
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Bot configuration
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -28,25 +31,30 @@ MESSAGES = {
 📈 실시간으로 주식 급등/급락을 모니터링하고 알림을 받아보세요.
 
 📋 사용 가능한 명령어:
-• /add [종목코드] - 모니터링 종목 추가
-• /remove [종목코드] - 종목 제거  
+• /add - 종목 추가 (이름 검색 가능)
+• /remove - 종목 제거
 • /list - 내 종목 목록 조회
 • /settings - 알림 조건 설정
 
-💡 종목코드는 6자리 숫자로 입력해주세요. (예: 005930)
+💡 종목 추가 방법:
+• /add 삼성 → 검색 결과에서 선택
+• /add 005930 → 종목코드로 직접 추가
+• 삼성 → 텍스트만 입력해도 검색
     """.strip(),
-    
+
     "help": """
 📋 명령어 안내:
 
-• /add [종목코드] - 모니터링 종목 추가 (최대 10개)
-• /remove [종목코드] - 종목 제거
+• /add - 종목 추가 (최대 10개)
+• /remove - 종목 제거
 • /list - 내 종목 목록 조회
 • /settings - 알림 조건 설정 (급등/급락 %)
 
-💡 예시:
-- /add 005930 (삼성전자 추가)
-- /remove 000660 (SK하이닉스 제거)
+💡 종목 검색 방법:
+• /add 삼성 (이름으로 검색)
+• /add 005930 (종목코드로 추가)
+• /삼성 (바로 검색)
+• 삼성 (텍스트만 입력해도 검색)
     """.strip(),
     
     "stock_added": "✅ {stock_code} 종목이 모니터링 목록에 추가되었습니다.",
@@ -55,8 +63,8 @@ MESSAGES = {
     "already_watching": "⚠️ {stock_code} 종목은 이미 모니터링 중입니다.",
     "not_watching": "⚠️ {stock_code} 종목은 모니터링 목록에 없습니다.",
     "watchlist_full": "⚠️ 모니터링 목록이 가득찼습니다. (최대 {max_size}개)",
-    "empty_watchlist": "📋 모니터링 중인 종목이 없습니다. /add 명령어로 종목을 추가해보세요!",
-    "invalid_stock_code": "❌ 올바른 6자리 종목코드를 입력해주세요. (예: 005930)",
+    "empty_watchlist": "📋 모니터링 중인 종목이 없습니다.\n종목명 또는 /add 명령어로 종목을 추가해보세요!",
+    "invalid_stock_code": "❌ 올바른 종목코드(6자리) 또는 종목명을 입력해주세요.",
     "settings_updated": "✅ 알림 설정이 업데이트되었습니다.",
     "invalid_threshold": "❌ 올바른 퍼센트 값을 입력해주세요. (1-50 범위)",
     "error": "❌ 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",

@@ -1,40 +1,29 @@
 #!/bin/bash
+# Korea Stock Alert Bot 실행 스크립트
 
-# Korea Stock Alert Bot Startup Script
+PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$PROJECT_ROOT"
 
-echo "🤖 Starting Korea Stock Alert Bot..."
+echo "=== 한국 주식 알림봇 시작 ==="
 
-# Check if virtual environment exists
+# 가상환경 생성/활성화
 if [ ! -d "venv" ]; then
-    echo "📦 Creating virtual environment..."
+    echo "가상환경 생성 중..."
     python3 -m venv venv
 fi
-
-# Activate virtual environment
-echo "🔧 Activating virtual environment..."
 source venv/bin/activate
 
-# Install dependencies
-echo "📥 Installing dependencies..."
-pip install -r requirements.txt
+# 의존성 설치
+echo "의존성 설치 중..."
+pip install -q -r requirements.txt
 
-# Check if .env file exists
+# .env 확인
 if [ ! -f ".env" ]; then
-    echo "⚠️  .env file not found!"
-    echo "📝 Please create .env file based on .env.example"
-    echo "💡 Set your TELEGRAM_BOT_TOKEN in the .env file"
+    echo ".env 파일이 없습니다!"
+    echo "  cp .env.example .env"
+    echo "  그 후 .env 파일에 토큰과 API 키를 설정하세요."
     exit 1
 fi
 
-# Load environment variables
-export $(cat .env | grep -v '^#' | xargs)
-
-# Check if bot token is set
-if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-    echo "❌ TELEGRAM_BOT_TOKEN is not set in .env file"
-    echo "💡 Please add your bot token to .env file"
-    exit 1
-fi
-
-echo "🚀 Starting bot..."
+echo "봇 실행 중..."
 python3 main.py

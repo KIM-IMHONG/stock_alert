@@ -55,8 +55,10 @@ class UserManager:
             # Try to add stock
             success = await self.db_manager.add_to_watchlist(user_id, stock_code)
             if success:
-                logger.info(f"User {user_id} added stock {stock_code} to watchlist")
-                return True, MESSAGES["stock_added"].format(stock_code=stock_code)
+                from ..utils.stock_utils import get_stock_name
+                name = get_stock_name(stock_code) or stock_code
+                logger.info(f"User {user_id} added stock {stock_code} ({name}) to watchlist")
+                return True, f"✅ {name} ({stock_code}) 종목이 모니터링 목록에 추가되었습니다."
             else:
                 return False, MESSAGES["already_watching"].format(stock_code=stock_code)
                 
@@ -95,24 +97,26 @@ class UserManager:
             return []
     
     async def format_watchlist_message(self, user_id: int) -> str:
-        """Format watchlist as message string"""
+        """Format watchlist as message string (종목명 포함)"""
         try:
+            from ..utils.stock_utils import get_stock_name
+
             watchlist = await self.get_user_watchlist(user_id)
-            
+
             if not watchlist:
                 return MESSAGES["empty_watchlist"]
-            
-            # Get current alert threshold
+
             threshold = await self.db_manager.get_user_alert_threshold(user_id)
-            
-            message = f"📋 **현재 모니터링 중인 종목** ({len(watchlist)}/{MAX_WATCHLIST_SIZE})\n\n"
-            
+
+            message = f"📋 *현재 모니터링 중인 종목* ({len(watchlist)}/{MAX_WATCHLIST_SIZE})\n\n"
+
             for i, stock_code in enumerate(watchlist, 1):
-                message += f"{i:2d}. {stock_code}\n"
-            
-            message += f"\n⚙️ 현재 알림 설정: ±{threshold:.1f}% 이상 변동 시"
+                name = get_stock_name(stock_code) or "알수없음"
+                message += f"{i}. {name} ({stock_code})\n"
+
+            message += f"\n⚙️ 알림 조건: 3분 내 ±{threshold:.1f}% 이상 변동 시"
             return message
-            
+
         except Exception as e:
             logger.error(f"Failed to format watchlist for user {user_id}: {e}")
             return MESSAGES["error"]
@@ -145,13 +149,13 @@ class UserManager:
             threshold = await self.db_manager.get_user_alert_threshold(user_id)
             
             message = f"""
-⚙️ **알림 설정**
+⚙️ *알림 설정*
 
-📊 현재 설정: ±{threshold:.1f}% 이상 변동 시 알림
+📊 현재 설정: 3분 내 ±{threshold:.1f}% 이상 변동 시 알림
 
 💡 설정 변경:
 알림을 받을 급등/급락 기준을 설정하세요.
-예: 5% → ±5% 이상 변동 시 알림
+예: 3% → 3분 내 ±3% 이상 변동 시 알림
 
 📝 사용법: 숫자만 입력하세요 (1-50)
             """.strip()
