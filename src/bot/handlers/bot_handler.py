@@ -26,7 +26,8 @@ class BotHandler:
         self.alert_sender = None  # Will be set after bot is initialized
 
         # User states for conversation flow
-        self.waiting_for_settings = set()
+        self.waiting_for_settings = set()      # 임계값 입력 대기
+        self.waiting_for_cooldown = set()      # 쿨다운 입력 대기
 
         # 종목 변경 시 호출되는 콜백 (WebSocket 구독 관리용)
         self.on_stock_added = None      # async def callback(stock_code: str)
@@ -318,19 +319,16 @@ class BotHandler:
                         parse_mode='Markdown'
                     )
             else:
-                # Show current settings and prompt for input
+                # Show current settings with sub-menu
                 message = await self.user_manager.get_alert_settings_message(user_id)
-                
+
                 keyboard = [
-                    [
-                        InlineKeyboardButton("3%", callback_data="set_threshold_3"),
-                        InlineKeyboardButton("5%", callback_data="set_threshold_5"),
-                        InlineKeyboardButton("10%", callback_data="set_threshold_10")
-                    ],
-                    [InlineKeyboardButton("직접 입력", callback_data="input_threshold")]
+                    [InlineKeyboardButton("🕐 감지 시간 변경", callback_data="menu_window")],
+                    [InlineKeyboardButton("📊 변동률 기준 변경", callback_data="menu_threshold")],
+                    [InlineKeyboardButton("⏱️ 쿨다운 시간 변경", callback_data="menu_cooldown")],
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                
+
                 await update.message.reply_text(
                     message,
                     reply_markup=reply_markup,
@@ -361,7 +359,8 @@ class BotHandler:
                 f"📊 *봇 상태*\n\n"
                 f"👤 관심종목: {stats['watchlist_count']}/{stats['watchlist_limit']}개\n"
                 f"{stock_list}\n"
-                f"⚙️ 알림 조건: 3분 내 ±{stats['alert_threshold']:.1f}% 이상 변동 시\n"
+                f"⚙️ 알림 조건: {stats['window_minutes']}분 내 ±{stats['alert_threshold']:.1f}% 이상 변동 시\n"
+                f"⏱️ 알림 쿨다운: {stats['cooldown_minutes']}분\n"
                 f"🔔 실시간 모니터링 {'활성' if stats['watchlist_count'] > 0 else '대기중'}"
             )
 
@@ -397,17 +396,82 @@ class BotHandler:
             elif data == "show_settings":
                 message = await self.user_manager.get_alert_settings_message(user_id)
                 keyboard = [
+                    [InlineKeyboardButton("🕐 감지 시간 변경", callback_data="menu_window")],
+                    [InlineKeyboardButton("📊 변동률 기준 변경", callback_data="menu_threshold")],
+                    [InlineKeyboardButton("⏱️ 쿨다운 시간 변경", callback_data="menu_cooldown")],
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.edit_message_text(
+                    message,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+
+            elif data == "menu_threshold":
+                keyboard = [
                     [
                         InlineKeyboardButton("3%", callback_data="set_threshold_3"),
                         InlineKeyboardButton("5%", callback_data="set_threshold_5"),
                         InlineKeyboardButton("10%", callback_data="set_threshold_10")
                     ],
-                    [InlineKeyboardButton("직접 입력", callback_data="input_threshold")]
+                    [InlineKeyboardButton("직접 입력", callback_data="input_threshold")],
+                    [InlineKeyboardButton("◀️ 뒤로", callback_data="show_settings")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                
+
                 await query.edit_message_text(
-                    message,
+                    "📊 *변동률 기준 설정*\n\n"
+                    "3분 내 변동률이 이 값 이상이면 알림을 보냅니다.\n"
+                    "원하는 값을 선택하거나 직접 입력하세요.",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+
+            elif data == "menu_window":
+                keyboard = [
+                    [
+                        InlineKeyboardButton("1분", callback_data="set_window_1"),
+                        InlineKeyboardButton("3분", callback_data="set_window_3"),
+                        InlineKeyboardButton("5분", callback_data="set_window_5"),
+                    ],
+                    [
+                        InlineKeyboardButton("7분", callback_data="set_window_7"),
+                        InlineKeyboardButton("10분", callback_data="set_window_10"),
+                    ],
+                    [InlineKeyboardButton("◀️ 뒤로", callback_data="show_settings")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.edit_message_text(
+                    "🕐 *변동 감지 시간 설정*\n\n"
+                    "이 시간 이내의 가격 변동률을 계산합니다.\n"
+                    "예: 3분 → 최근 3분간 변동률 기준으로 알림\n"
+                    "짧을수록 민감, 길수록 큰 추세 감지",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+
+            elif data == "menu_cooldown":
+                keyboard = [
+                    [
+                        InlineKeyboardButton("5분", callback_data="set_cooldown_5"),
+                        InlineKeyboardButton("15분", callback_data="set_cooldown_15"),
+                        InlineKeyboardButton("30분", callback_data="set_cooldown_30")
+                    ],
+                    [
+                        InlineKeyboardButton("60분", callback_data="set_cooldown_60"),
+                        InlineKeyboardButton("직접 입력", callback_data="input_cooldown")
+                    ],
+                    [InlineKeyboardButton("◀️ 뒤로", callback_data="show_settings")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.edit_message_text(
+                    "⏱️ *쿨다운 시간 설정*\n\n"
+                    "같은 종목에 대해 알림을 보낸 후,\n"
+                    "다음 알림까지 대기하는 시간입니다.\n\n"
+                    "원하는 값을 선택하거나 직접 입력하세요.",
                     reply_markup=reply_markup,
                     parse_mode='Markdown'
                 )
@@ -433,6 +497,47 @@ class BotHandler:
                 self.waiting_for_settings.add(user_id)
                 await query.edit_message_text(
                     "💡 알림 기준을 입력해주세요 (1-50 사이의 숫자)\n예: 7",
+                    parse_mode='Markdown'
+                )
+
+            elif data.startswith("set_window_"):
+                minutes = int(data.split("_")[-1])
+                success, message = await self.user_manager.update_window_settings(
+                    user_id, minutes
+                )
+
+                keyboard = [
+                    [InlineKeyboardButton("⚙️ 설정으로 돌아가기", callback_data="show_settings")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.edit_message_text(
+                    message,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+
+            elif data.startswith("set_cooldown_"):
+                minutes = int(data.split("_")[-1])
+                success, message = await self.user_manager.update_cooldown_settings(
+                    user_id, minutes
+                )
+
+                keyboard = [
+                    [InlineKeyboardButton("⚙️ 설정으로 돌아가기", callback_data="show_settings")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.edit_message_text(
+                    message,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+
+            elif data == "input_cooldown":
+                self.waiting_for_cooldown.add(user_id)
+                await query.edit_message_text(
+                    "💡 쿨다운 시간을 입력해주세요 (1-120 사이의 분 단위 숫자)\n예: 10",
                     parse_mode='Markdown'
                 )
                 
@@ -576,7 +681,7 @@ class BotHandler:
             user_id = update.effective_user.id
             text = update.message.text.strip()
 
-            # 설정값 입력 대기 중
+            # 임계값 입력 대기 중
             if user_id in self.waiting_for_settings:
                 self.waiting_for_settings.remove(user_id)
 
@@ -587,7 +692,7 @@ class BotHandler:
                     )
 
                     keyboard = [
-                        [InlineKeyboardButton("📋 내 종목 보기", callback_data="show_list")]
+                        [InlineKeyboardButton("⚙️ 설정으로 돌아가기", callback_data="show_settings")]
                     ]
                     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -599,6 +704,33 @@ class BotHandler:
                 except ValueError:
                     await update.message.reply_text(
                         MESSAGES["invalid_threshold"],
+                        parse_mode='Markdown'
+                    )
+                return
+
+            # 쿨다운 입력 대기 중
+            if user_id in self.waiting_for_cooldown:
+                self.waiting_for_cooldown.remove(user_id)
+
+                try:
+                    minutes = int(text)
+                    success, message = await self.user_manager.update_cooldown_settings(
+                        user_id, minutes
+                    )
+
+                    keyboard = [
+                        [InlineKeyboardButton("⚙️ 설정으로 돌아가기", callback_data="show_settings")]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+
+                    await update.message.reply_text(
+                        message,
+                        reply_markup=reply_markup,
+                        parse_mode='Markdown'
+                    )
+                except ValueError:
+                    await update.message.reply_text(
+                        "❌ 올바른 숫자를 입력해주세요. (1-120 사이)",
                         parse_mode='Markdown'
                     )
                 return

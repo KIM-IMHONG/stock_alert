@@ -19,6 +19,8 @@ class User:
     username: Optional[str]
     first_name: str
     alert_threshold: float
+    cooldown_minutes: int
+    window_minutes: int
     created_at: datetime
     updated_at: datetime
 
@@ -55,10 +57,20 @@ class DatabaseManager:
                     username TEXT,
                     first_name TEXT NOT NULL,
                     alert_threshold REAL DEFAULT 5.0,
+                    cooldown_minutes INTEGER DEFAULT 15,
+                    window_minutes INTEGER DEFAULT 3,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # Migration: add new columns if missing
+            for col, default in [("cooldown_minutes", 15), ("window_minutes", 3)]:
+                try:
+                    await db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT {default}")
+                    await db.commit()
+                except Exception:
+                    pass  # Column already exists
             
             # Watchlist table
             await db.execute("""
@@ -135,8 +147,10 @@ class DatabaseManager:
                     username=row[1],
                     first_name=row[2],
                     alert_threshold=row[3],
-                    created_at=datetime.fromisoformat(row[4]),
-                    updated_at=datetime.fromisoformat(row[5])
+                    cooldown_minutes=row[4] if row[4] is not None else 15,
+                    window_minutes=row[5] if row[5] is not None else 3,
+                    created_at=datetime.fromisoformat(row[6]),
+                    updated_at=datetime.fromisoformat(row[7])
                 )
     
     async def add_to_watchlist(self, user_id: int, stock_code: str) -> bool:
@@ -194,6 +208,46 @@ class DatabaseManager:
             await db.commit()
             return cursor.rowcount > 0
     
+    async def update_cooldown_minutes(self, user_id: int, minutes: int) -> bool:
+        """Update user's alert cooldown minutes"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                UPDATE users
+                SET cooldown_minutes = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+            """, (minutes, user_id))
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def get_user_cooldown_minutes(self, user_id: int) -> int:
+        """Get user's alert cooldown minutes"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("""
+                SELECT cooldown_minutes FROM users WHERE user_id = ?
+            """, (user_id,)) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row and row[0] is not None else 15
+
+    async def update_window_minutes(self, user_id: int, minutes: int) -> bool:
+        """Update user's price window minutes"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                UPDATE users
+                SET window_minutes = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+            """, (minutes, user_id))
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def get_user_window_minutes(self, user_id: int) -> int:
+        """Get user's price window minutes"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("""
+                SELECT window_minutes FROM users WHERE user_id = ?
+            """, (user_id,)) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row and row[0] is not None else 3
+
     async def get_user_alert_threshold(self, user_id: int) -> float:
         """Get user's alert threshold"""
         async with aiosqlite.connect(self.db_path) as db:

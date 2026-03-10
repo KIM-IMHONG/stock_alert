@@ -7,7 +7,11 @@ from typing import List, Optional, Tuple
 from datetime import datetime
 
 from ..models.database import DatabaseManager
-from ..config import MAX_WATCHLIST_SIZE, MESSAGES
+from ..config import (
+    MAX_WATCHLIST_SIZE, MESSAGES,
+    MIN_COOLDOWN_MINUTES, MAX_COOLDOWN_MINUTES,
+    MIN_WINDOW_MINUTES, MAX_WINDOW_MINUTES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +118,8 @@ class UserManager:
                 name = get_stock_name(stock_code) or "알수없음"
                 message += f"{i}. {name} ({stock_code})\n"
 
-            message += f"\n⚙️ 알림 조건: 3분 내 ±{threshold:.1f}% 이상 변동 시"
+            window = await self.db_manager.get_user_window_minutes(user_id)
+            message += f"\n⚙️ 알림 조건: {window}분 내 ±{threshold:.1f}% 이상 변동 시"
             return message
 
         except Exception as e:
@@ -143,25 +148,65 @@ class UserManager:
             logger.error(f"Failed to update alert settings for user {user_id}: {e}")
             return False, MESSAGES["error"]
     
+    async def update_window_settings(self, user_id: int, minutes: int) -> Tuple[bool, str]:
+        """
+        Update user's price window minutes
+        Returns: (success, message)
+        """
+        try:
+            if not (MIN_WINDOW_MINUTES <= minutes <= MAX_WINDOW_MINUTES):
+                return False, f"❌ 감지 시간은 {MIN_WINDOW_MINUTES}~{MAX_WINDOW_MINUTES}분 사이로 설정해주세요."
+
+            success = await self.db_manager.update_window_minutes(user_id, minutes)
+            if success:
+                logger.info(f"User {user_id} updated window to {minutes}min")
+                return True, f"✅ 변동 감지 시간이 {minutes}분으로 설정되었습니다."
+            else:
+                return False, MESSAGES["error"]
+
+        except Exception as e:
+            logger.error(f"Failed to update window for user {user_id}: {e}")
+            return False, MESSAGES["error"]
+
+    async def update_cooldown_settings(self, user_id: int, minutes: int) -> Tuple[bool, str]:
+        """
+        Update user's alert cooldown minutes
+        Returns: (success, message)
+        """
+        try:
+            if not (MIN_COOLDOWN_MINUTES <= minutes <= MAX_COOLDOWN_MINUTES):
+                return False, f"❌ 쿨다운은 {MIN_COOLDOWN_MINUTES}~{MAX_COOLDOWN_MINUTES}분 사이로 설정해주세요."
+
+            success = await self.db_manager.update_cooldown_minutes(user_id, minutes)
+            if success:
+                logger.info(f"User {user_id} updated cooldown to {minutes}min")
+                return True, f"✅ 알림 쿨다운이 {minutes}분으로 설정되었습니다."
+            else:
+                return False, MESSAGES["error"]
+
+        except Exception as e:
+            logger.error(f"Failed to update cooldown for user {user_id}: {e}")
+            return False, MESSAGES["error"]
+
     async def get_alert_settings_message(self, user_id: int) -> str:
         """Get formatted alert settings message"""
         try:
             threshold = await self.db_manager.get_user_alert_threshold(user_id)
-            
+            cooldown = await self.db_manager.get_user_cooldown_minutes(user_id)
+            window = await self.db_manager.get_user_window_minutes(user_id)
+
             message = f"""
 ⚙️ *알림 설정*
 
-📊 현재 설정: 3분 내 ±{threshold:.1f}% 이상 변동 시 알림
+🕐 감지 시간: {window}분 이내 변동 감지
+📊 변동률 기준: ±{threshold:.1f}% 이상 변동 시 알림
+⏱️ 알림 쿨다운: {cooldown}분 (같은 종목 재알림 간격)
 
-💡 설정 변경:
-알림을 받을 급등/급락 기준을 설정하세요.
-예: 3% → 3분 내 ±3% 이상 변동 시 알림
-
-📝 사용법: 숫자만 입력하세요 (1-50)
+아래에서 변경할 설정을 선택하세요.
             """.strip()
-            
+
             return message
-            
+
         except Exception as e:
             logger.error(f"Failed to get alert settings for user {user_id}: {e}")
             return MESSAGES["error"]
@@ -171,11 +216,15 @@ class UserManager:
         try:
             watchlist = await self.get_user_watchlist(user_id)
             threshold = await self.db_manager.get_user_alert_threshold(user_id)
-            
+            cooldown = await self.db_manager.get_user_cooldown_minutes(user_id)
+            window = await self.db_manager.get_user_window_minutes(user_id)
+
             return {
                 "watchlist_count": len(watchlist),
                 "watchlist_limit": MAX_WATCHLIST_SIZE,
                 "alert_threshold": threshold,
+                "cooldown_minutes": cooldown,
+                "window_minutes": window,
                 "can_add_more": len(watchlist) < MAX_WATCHLIST_SIZE
             }
         except Exception as e:
@@ -184,5 +233,7 @@ class UserManager:
                 "watchlist_count": 0,
                 "watchlist_limit": MAX_WATCHLIST_SIZE,
                 "alert_threshold": 5.0,
+                "cooldown_minutes": 15,
+                "window_minutes": 3,
                 "can_add_more": True
             }

@@ -20,8 +20,13 @@ MAX_WATCHLIST_SIZE = 10
 MIN_WATCHLIST_SIZE = 0
 
 # Alert configuration
-ALERT_COOLDOWN_MINUTES = 15  # 중복 알림 방지를 위한 쿨다운 시간
+ALERT_COOLDOWN_MINUTES = 15  # 기본 쿨다운 시간 (분)
 DEFAULT_ALERT_THRESHOLD = 5.0  # 기본 급등/급락 임계값 (%)
+MIN_COOLDOWN_MINUTES = 1  # 최소 쿨다운 (분)
+MAX_COOLDOWN_MINUTES = 120  # 최대 쿨다운 (분)
+DEFAULT_WINDOW_MINUTES = 3  # 기본 변동 감지 윈도우 (분)
+MIN_WINDOW_MINUTES = 1  # 최소 윈도우 (분)
+MAX_WINDOW_MINUTES = 10  # 최대 윈도우 (분)
 
 # Message templates
 MESSAGES = {

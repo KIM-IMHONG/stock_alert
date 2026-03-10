@@ -1,17 +1,20 @@
 """
 Alert sending and management for Korea Stock Alert Bot
 
-알림 조건: 3분 내 변동률이 유저 임계값 초과 시 발동
+알림 조건: 유저별 윈도우(기본 3분) 내 변동률이 유저 임계값 초과 시 발동
 """
 import time
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional
+from typing import Dict, Optional, TYPE_CHECKING
 from telegram import Bot
 from telegram.error import TelegramError
 
 from ..models.database import DatabaseManager
-from ..config import ALERT_COOLDOWN_MINUTES
+from ..config import ALERT_COOLDOWN_MINUTES, DEFAULT_WINDOW_MINUTES
+
+if TYPE_CHECKING:
+    pass  # PriceTracker is in main.py, avoid circular import
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +23,12 @@ KST = timezone(timedelta(hours=9))
 
 
 class AlertSender:
-    """알림 발송 관리 (3분 변동률 기반)"""
+    """알림 발송 관리 (유저별 윈도우/임계값/쿨다운)"""
 
-    def __init__(self, bot: Bot, db_manager: DatabaseManager):
+    def __init__(self, bot: Bot, db_manager: DatabaseManager, price_tracker=None):
         self.bot = bot
         self.db_manager = db_manager
+        self.price_tracker = price_tracker  # PriceTracker 참조
 
         # 인메모리 쿨다운: "user_id:stock_code" → 마지막 발송 epoch
         self._cooldown_cache: Dict[str, float] = {}
@@ -36,10 +40,11 @@ class AlertSender:
     def _now_kst(self) -> datetime:
         return datetime.now(KST)
 
-    def _is_in_cooldown(self, user_id: int, stock_code: str) -> bool:
+    def _is_in_cooldown(self, user_id: int, stock_code: str, cooldown_minutes: int = None) -> bool:
         key = f"{user_id}:{stock_code}"
         last = self._cooldown_cache.get(key, 0)
-        return (time.time() - last) < (ALERT_COOLDOWN_MINUTES * 60)
+        minutes = cooldown_minutes if cooldown_minutes is not None else ALERT_COOLDOWN_MINUTES
+        return (time.time() - last) < (minutes * 60)
 
     def _set_cooldown(self, user_id: int, stock_code: str):
         self._cooldown_cache[f"{user_id}:{stock_code}"] = time.time()
@@ -53,12 +58,12 @@ class AlertSender:
         return False
 
     def format_alert_message(self, stock_code: str, stock_name: str,
-                           current_price: int, change_rate_3m: float,
-                           change_from_open: Optional[float] = None,
-                           open_price: int = 0) -> str:
+                           current_price: int, change_rate: float,
+                           window_minutes: int = 3,
+                           base_price: int = 0) -> str:
         """알림 메시지 포맷"""
         # 급등/급락 판정
-        if change_rate_3m >= 0:
+        if change_rate >= 0:
             alert_emoji = "🚀"
             alert_type = "급등"
             trend_emoji = "📈"
@@ -74,12 +79,11 @@ class AlertSender:
             "",
             f"📌 종목: {stock_name} ({stock_code})",
             f"💰 현재가: {current_price:,}원",
-            f"{trend_emoji} 3분 변동: {change_rate_3m:+.2f}%",
+            f"{trend_emoji} {window_minutes}분 변동: {change_rate:+.2f}%",
         ]
 
-        if change_from_open is not None and open_price > 0:
-            open_emoji = "📈" if change_from_open >= 0 else "📉"
-            lines.append(f"{open_emoji} 시가대비: {change_from_open:+.2f}% (시가 {open_price:,}원)")
+        if base_price > 0:
+            lines.append(f"📍 기준가: {base_price:,}원")
 
         lines.extend([
             "",
@@ -90,24 +94,41 @@ class AlertSender:
 
     async def send_alert_to_user(self, user_id: int, stock_code: str,
                                stock_name: str, current_price: int,
-                               change_rate_3m: float,
-                               change_from_open: Optional[float] = None,
-                               open_price: int = 0) -> bool:
-        """유저 1명에게 알림 발송"""
+                               change_rate_default: float) -> bool:
+        """유저 1명에게 알림 발송 (유저별 윈도우로 변동률 재계산)"""
         try:
-            # 1. 유저 임계값 체크 (3분 변동률 기준)
+            # 1. 유저 설정 조회
             user_threshold = await self.db_manager.get_user_alert_threshold(user_id)
-            if abs(change_rate_3m) < user_threshold:
+            user_cooldown = await self.db_manager.get_user_cooldown_minutes(user_id)
+            user_window = await self.db_manager.get_user_window_minutes(user_id)
+
+            # 2. 유저별 윈도우로 변동률 계산
+            change_rate = change_rate_default
+            base_price = 0
+            if self.price_tracker:
+                custom_rate = self.price_tracker.calc_change_rate(
+                    stock_code, user_window * 60
+                )
+                if custom_rate is not None:
+                    change_rate = custom_rate
+                info = self.price_tracker.get_window_start_info(
+                    stock_code, user_window * 60
+                )
+                if info is not None:
+                    base_price = info[0]
+
+            # 3. 임계값 체크
+            if abs(change_rate) < user_threshold:
                 return False
 
-            # 2. 쿨다운 체크
-            if self._is_in_cooldown(user_id, stock_code):
+            # 4. 쿨다운 체크
+            if self._is_in_cooldown(user_id, stock_code, user_cooldown):
                 return False
 
-            # 3. 메시지 발송
+            # 5. 메시지 발송
             message = self.format_alert_message(
                 stock_code, stock_name, current_price,
-                change_rate_3m, change_from_open, open_price
+                change_rate, user_window, base_price
             )
 
             await self.bot.send_message(
@@ -116,21 +137,21 @@ class AlertSender:
                 parse_mode='Markdown'
             )
 
-            # 4. 쿨다운 설정
+            # 6. 쿨다운 설정
             self._set_cooldown(user_id, stock_code)
 
-            # 5. DB 이력 기록
+            # 7. DB 이력 기록
             try:
-                alert_type = "상승" if change_rate_3m >= 0 else "하락"
+                alert_type = "상승" if change_rate >= 0 else "하락"
                 await self.db_manager.add_alert_history(
-                    user_id, stock_code, alert_type, current_price, change_rate_3m
+                    user_id, stock_code, alert_type, current_price, change_rate
                 )
             except Exception as e:
                 logger.error(f"알림 이력 저장 실패: {e}")
 
             logger.info(
                 f"알림 발송: user={user_id}, {stock_code}({stock_name}) "
-                f"{current_price:,}원 (3분:{change_rate_3m:+.2f}%)"
+                f"{current_price:,}원 ({user_window}분:{change_rate:+.2f}%)"
             )
             return True
 
@@ -143,14 +164,13 @@ class AlertSender:
 
     async def broadcast_stock_alert(self, stock_code: str, stock_name: str,
                                   current_price: int, change_rate_3m: float,
-                                  change_from_open: Optional[float] = None,
-                                  open_price: int = 0) -> int:
+                                  **kwargs) -> int:
         """
         종목 알림 브로드캐스트
 
         - 스로틀: 같은 종목 10초 간격
-        - 쿨다운: 같은 유저+종목 15분 간격
-        - 조건: 3분 변동률 >= 유저 임계값
+        - 쿨다운: 유저별 설정
+        - 조건: 유저별 윈도우 변동률 >= 유저 임계값
         """
         if self._should_throttle(stock_code):
             return 0
@@ -165,7 +185,7 @@ class AlertSender:
                 try:
                     ok = await self.send_alert_to_user(
                         user_id, stock_code, stock_name, current_price,
-                        change_rate_3m, change_from_open, open_price
+                        change_rate_3m
                     )
                     if ok:
                         sent += 1

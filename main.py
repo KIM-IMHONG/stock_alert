@@ -52,10 +52,12 @@ logger = logging.getLogger('StockAlertBot')
 # 3분 가격 추적기
 # ============================================================
 class PriceTracker:
-    """종목별 3분 윈도우 가격 변동 추적"""
+    """종목별 가격 변동 추적 (최대 10분 히스토리 보관)"""
+
+    MAX_HISTORY_SECONDS = 600  # 10분 히스토리 보관
 
     def __init__(self, window_seconds: int = 180):
-        self._window = window_seconds  # 3분 = 180초
+        self._default_window = window_seconds  # 기본 윈도우 (3분)
         # {stock_code: deque of (timestamp, price)}
         self._history: Dict[str, deque] = defaultdict(deque)
         # {stock_code: open_price} - 당일 시가 캐시
@@ -64,10 +66,10 @@ class PriceTracker:
     def update(self, stock_code: str, price: int, open_price: int = 0
                ) -> Tuple[Optional[float], Optional[float]]:
         """
-        가격 업데이트 후 변동률 반환
+        가격 업데이트 후 기본 윈도우 변동률 반환
 
         Returns:
-            (3분_변동률, 시가대비_변동률) - 데이터 부족 시 None
+            (기본윈도우_변동률, 시가대비_변동률) - 데이터 부족 시 None
         """
         now = time.time()
         history = self._history[stock_code]
@@ -77,17 +79,13 @@ class PriceTracker:
         if open_price > 0:
             self._open_prices[stock_code] = open_price
 
-        # 3분 초과 데이터 제거
-        cutoff = now - self._window
+        # 최대 히스토리(10분) 초과 데이터 제거
+        cutoff = now - self.MAX_HISTORY_SECONDS
         while history and history[0][0] < cutoff:
             history.popleft()
 
-        # 3분 변동률 계산
-        change_3m = None
-        if len(history) >= 2:
-            oldest_price = history[0][1]
-            if oldest_price > 0:
-                change_3m = round(((price - oldest_price) / oldest_price) * 100, 2)
+        # 기본 윈도우 변동률 계산
+        change = self.calc_change_rate(stock_code, self._default_window)
 
         # 시가 대비 변동률
         change_from_open = None
@@ -95,7 +93,54 @@ class PriceTracker:
         if op and op > 0:
             change_from_open = round(((price - op) / op) * 100, 2)
 
-        return change_3m, change_from_open
+        return change, change_from_open
+
+    def calc_change_rate(self, stock_code: str, window_seconds: int) -> Optional[float]:
+        """지정된 윈도우(초)로 변동률 계산"""
+        history = self._history.get(stock_code)
+        if not history or len(history) < 2:
+            return None
+
+        now = history[-1][0]
+        cutoff = now - window_seconds
+        current_price = history[-1][1]
+
+        # 윈도우 시작 시점의 가격 찾기 (cutoff 이전의 가장 가까운 데이터)
+        oldest_price = None
+        for ts, price in history:
+            if ts >= cutoff:
+                oldest_price = price
+                break
+
+        if oldest_price is None or oldest_price <= 0:
+            return None
+
+        return round(((current_price - oldest_price) / oldest_price) * 100, 2)
+
+    def get_window_start_info(self, stock_code: str, window_seconds: int
+                             ) -> Optional[Tuple[int, int]]:
+        """
+        윈도우 시작 시점의 (가격, 경과초) 반환
+
+        Returns:
+            (base_price, elapsed_seconds) 또는 None
+        """
+        history = self._history.get(stock_code)
+        if not history or len(history) < 2:
+            return None
+
+        now = history[-1][0]
+        cutoff = now - window_seconds
+
+        for ts, price in history:
+            if ts >= cutoff:
+                elapsed = int(now - ts)
+                return price, elapsed
+        return None
+
+    def get_open_price(self, stock_code: str) -> int:
+        """시가 조회"""
+        return self._open_prices.get(stock_code, 0)
 
     def clear(self, stock_code: str = None):
         if stock_code:
@@ -151,8 +196,8 @@ class KoreaStockAlertBot:
         await self.bot_handler.application.initialize()
         bot = self.bot_handler.application.bot
 
-        # 3. 알림 발송기
-        self.alert_sender = AlertSender(bot, self.db_manager)
+        # 3. 알림 발송기 (PriceTracker 참조 전달)
+        self.alert_sender = AlertSender(bot, self.db_manager, self.price_tracker)
         self.bot_handler.set_alert_sender(self.alert_sender)
 
         # 4. KIS API
