@@ -21,34 +21,25 @@ class RealtimeData:
     """실시간 체결 데이터"""
     stock_code: str
     current_price: int
-    change_rate: float       # 전일대비율
-    change_amount: int       # 전일대비
-    open_price: int          # 시가
-    high_price: int          # 고가
-    low_price: int           # 저가
-    trading_volume: int      # 체결거래량
-    accumulated_volume: int  # 누적거래량
+    change_rate: float
+    change_amount: int
+    trading_volume: int
+    accumulated_volume: int
     timestamp: datetime
 
 
 class KISWebSocketClient:
     """한국투자증권 WebSocket 실시간 데이터 클라이언트 (Async)"""
 
-    # H0STCNT0 필드 인덱스 (주식체결 - 정규장)
+    # H0STCNT0 필드 인덱스 (주식체결)
     F_STOCK_CODE = 0       # 종목코드
     F_TIME = 1             # 체결시간
     F_CURRENT_PRICE = 2    # 현재가
     F_SIGN = 3             # 전일대비부호 (1:상한,2:상승,3:보합,4:하한,5:하락)
     F_CHANGE_AMOUNT = 4    # 전일대비
     F_CHANGE_RATE = 5      # 전일대비율
-    F_OPEN_PRICE = 7       # 시가
-    F_HIGH_PRICE = 8       # 고가
-    F_LOW_PRICE = 9        # 저가
     F_VOLUME = 12          # 체결거래량
     F_ACC_VOLUME = 13      # 누적거래량
-
-    # TR ID (H0STCNT0는 정규장+시간외 체결 모두 수신)
-    TR_STOCK = "H0STCNT0"
 
     def __init__(self, ws_url: str, approval_key: str):
         self.ws_url = ws_url
@@ -143,7 +134,7 @@ class KISWebSocketClient:
             },
             "body": {
                 "input": {
-                    "tr_id": self.TR_STOCK,
+                    "tr_id": "H0STCNT0",
                     "tr_key": stock_code
                 }
             }
@@ -162,7 +153,7 @@ class KISWebSocketClient:
             },
             "body": {
                 "input": {
-                    "tr_id": self.TR_STOCK,
+                    "tr_id": "H0STCNT0",
                     "tr_key": stock_code
                 }
             }
@@ -203,7 +194,7 @@ class KISWebSocketClient:
                 logger.debug("암호화 데이터 수신 (복호화 미지원)")
                 return
 
-            if tr_id == self.TR_STOCK:
+            if tr_id == "H0STCNT0":
                 await self._parse_stock_data(parts[3], data_count)
 
         except Exception as e:
@@ -240,9 +231,6 @@ class KISWebSocketClient:
                     current_price=price,
                     change_rate=change_rate,
                     change_amount=change_amount,
-                    open_price=int(fields[offset + self.F_OPEN_PRICE]),
-                    high_price=int(fields[offset + self.F_HIGH_PRICE]),
-                    low_price=int(fields[offset + self.F_LOW_PRICE]),
                     trading_volume=int(fields[offset + self.F_VOLUME]),
                     accumulated_volume=int(fields[offset + self.F_ACC_VOLUME]),
                     timestamp=datetime.now()

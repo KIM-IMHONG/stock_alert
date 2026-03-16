@@ -8,7 +8,10 @@ import json
 import os
 from typing import Dict, List, Tuple, Optional
 
+import io
+
 import requests
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -51,37 +54,27 @@ class StockSearcher:
             logger.info("KRX에서 종목 리스트 가져오는 중...")
 
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': 'http://data.krx.co.kr/contents/MDC/MDI/mdiStat/std/std_main.jsp',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
             }
 
-            # 종목 finder API - 전시장(ALL) 한번에 조회
-            url = 'http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd'
-            payload = {
-                'bld': 'dbms/comm/finder/finder_stkisu',
-                'locale': 'ko_KR',
-                'mktsel': 'ALL',
-                'typeNo': '0',
-                'searchText': '',
-            }
-            resp = requests.post(url, data=payload, headers=headers, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-
-            items = data.get('block1', [])
             all_stocks = {}
-            market_counts = {}
-            for item in items:
-                code = item.get('short_code', '')
-                name = item.get('codeName', '')
-                market = item.get('marketName', '')
-                # KOSPI(유가증권), KOSDAQ(코스닥)만 포함 (코넥스 제외)
-                if code and name and len(code) == 6 and code.isdigit() and market in ('유가증권', '코스닥'):
-                    all_stocks[code] = name
-                    market_counts[market] = market_counts.get(market, 0) + 1
+            for mkt_type, mkt_name in [('stockMkt', 'KOSPI'), ('kosdaqMkt', 'KOSDAQ')]:
+                url = 'https://kind.krx.co.kr/corpgeneral/corpList.do'
+                params = {'method': 'download', 'marketType': mkt_type}
+                resp = requests.get(url, params=params, headers=headers, timeout=15)
+                resp.raise_for_status()
 
-            for mkt, cnt in market_counts.items():
-                logger.info(f"  {mkt}: {cnt}개 종목 로드")
+                dfs = pd.read_html(io.StringIO(resp.text), encoding='euc-kr')
+                df = dfs[0]
+                count = 0
+                for _, row in df.iterrows():
+                    code = str(row['종목코드']).zfill(6)
+                    name = str(row['회사명']).strip()
+                    if code and name and len(code) == 6 and code.isdigit():
+                        all_stocks[code] = name
+                        count += 1
+
+                logger.info(f"  {mkt_name}: {count}개 종목 로드")
 
             if all_stocks:
                 self._stocks = all_stocks

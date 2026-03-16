@@ -60,7 +60,8 @@ class AlertSender:
     def format_alert_message(self, stock_code: str, stock_name: str,
                            current_price: int, change_rate: float,
                            window_minutes: int = 3,
-                           base_price: int = 0) -> str:
+                           change_from_open: Optional[float] = None,
+                           open_price: int = 0) -> str:
         """알림 메시지 포맷"""
         # 급등/급락 판정
         if change_rate >= 0:
@@ -82,8 +83,9 @@ class AlertSender:
             f"{trend_emoji} {window_minutes}분 변동: {change_rate:+.2f}%",
         ]
 
-        if base_price > 0:
-            lines.append(f"📍 기준가: {base_price:,}원")
+        if change_from_open is not None and open_price > 0:
+            open_emoji = "📈" if change_from_open >= 0 else "📉"
+            lines.append(f"{open_emoji} 시가대비: {change_from_open:+.2f}% (시가 {open_price:,}원)")
 
         lines.extend([
             "",
@@ -94,7 +96,9 @@ class AlertSender:
 
     async def send_alert_to_user(self, user_id: int, stock_code: str,
                                stock_name: str, current_price: int,
-                               change_rate_default: float) -> bool:
+                               change_rate_default: float,
+                               change_from_open: Optional[float] = None,
+                               open_price: int = 0) -> bool:
         """유저 1명에게 알림 발송 (유저별 윈도우로 변동률 재계산)"""
         try:
             # 1. 유저 설정 조회
@@ -104,18 +108,12 @@ class AlertSender:
 
             # 2. 유저별 윈도우로 변동률 계산
             change_rate = change_rate_default
-            base_price = 0
-            if self.price_tracker:
+            if self.price_tracker and user_window != DEFAULT_WINDOW_MINUTES:
                 custom_rate = self.price_tracker.calc_change_rate(
                     stock_code, user_window * 60
                 )
                 if custom_rate is not None:
                     change_rate = custom_rate
-                info = self.price_tracker.get_window_start_info(
-                    stock_code, user_window * 60
-                )
-                if info is not None:
-                    base_price = info[0]
 
             # 3. 임계값 체크
             if abs(change_rate) < user_threshold:
@@ -128,7 +126,7 @@ class AlertSender:
             # 5. 메시지 발송
             message = self.format_alert_message(
                 stock_code, stock_name, current_price,
-                change_rate, user_window, base_price
+                change_rate, user_window, change_from_open, open_price
             )
 
             await self.bot.send_message(
@@ -164,7 +162,8 @@ class AlertSender:
 
     async def broadcast_stock_alert(self, stock_code: str, stock_name: str,
                                   current_price: int, change_rate_3m: float,
-                                  **kwargs) -> int:
+                                  change_from_open: Optional[float] = None,
+                                  open_price: int = 0) -> int:
         """
         종목 알림 브로드캐스트
 
@@ -185,7 +184,7 @@ class AlertSender:
                 try:
                     ok = await self.send_alert_to_user(
                         user_id, stock_code, stock_name, current_price,
-                        change_rate_3m
+                        change_rate_3m, change_from_open, open_price
                     )
                     if ok:
                         sent += 1
